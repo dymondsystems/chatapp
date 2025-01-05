@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure P2P Chat with Sidebar, File Upload, and Profile</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.3.1/dist/peerjs.min.js"></script>
+    <style>
+        /* Basic Styles for Sidebar, Chatbox, etc. */
+        body {
+            font-family: Arial, sans-serif;
+        }
+
+        .sidebar {
+            width: 200px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            background: #333;
+            color: white;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .content {
+            margin-left: 220px;
+            padding: 20px;
+        }
+
+        .sidebar ul {
+            list-style-type: none;
+            padding: 0;
+        }
+
+        .sidebar ul li {
+            margin: 10px 0;
+        }
+
+        .chatbox {
+            height: 300px;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        .message-input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        .file-upload {
+            margin-top: 20px;
+        }
+
+        .file-upload input {
+            margin-bottom: 10px;
+        }
+
+        .profile-pic img {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            margin-top: 10px;
+        }
+
+        .loading {
+            display: none;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        #app {
+            display: flex;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app">
+        <div class="sidebar">
+            <h3>Profile</h3>
+            <div class="profile-pic">
+                <img v-if="profilePic" :src="profilePic" alt="Profile Picture" />
+                <input v-if="!profilePic" type="file" @change="uploadProfilePic" />
+            </div>
+            <h3>Sections</h3>
+            <ul>
+                <li @click="setActiveSection('chat')">Chat</li>
+                <li @click="setActiveSection('files')">Files</li>
+                <li @click="setActiveSection('profile')">Profile</li>
+            </ul>
+        </div>
+
+        <div class="content">
+            <!-- Loading Spinner -->
+            <div class="loading" :class="{ show: loading }">Loading...</div>
+
+            <!-- Login Screen -->
+            <div v-if="screen === 'login'">
+                <h2>Login</h2>
+                <input v-model="usernameInput" placeholder="Enter your username" />
+                <button @click="submitLogin" :disabled="loading">Login</button>
+                <p v-if="peerError" style="color: red;">{{ peerError }}</p>
+            </div>
+
+            <!-- Chat Section -->
+            <div v-if="screen === 'chat'">
+                <h2>Welcome, {{ usernameInput }}</h2>
+                <div class="chatbox" id="chatbox">
+                    <div v-for="chat in chats" :key="chat.timestamp">
+                        <strong>{{ chat.sender }}:</strong> {{ chat.message }}
+                    </div>
+                </div>
+                <input class="message-input" v-model="chatMessageInput" placeholder="Type a message" />
+                <button @click="submitChat" :disabled="loading">Send</button>
+            </div>
+
+            <!-- File Section -->
+            <div v-if="screen === 'files'">
+                <h2>File Upload</h2>
+                <div class="file-upload">
+                    <input type="file" @change="uploadFile" />
+                    <ul>
+                        <li v-for="file in uploadedFiles" :key="file.name">{{ file.name }}</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Profile Section -->
+            <div v-if="screen === 'profile'">
+                <h2>Profile</h2>
+                <p>Username: {{ usernameInput }}</p>
+                <p v-if="profilePic">Profile Picture: <img :src="profilePic" alt="Profile Picture" /></p>
+                <p v-if="!profilePic">No profile picture uploaded</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const appPrefix = "secure-p2p-app-"; 
+
+        const oldChats = localStorage.getItem("chats");
+        const chats = oldChats ? JSON.parse(oldChats) : [];
+
+        const app = new Vue({
+            el: "#app",
+            data: {
+                screen: "login", 
+                usernameInput: localStorage.getItem("username") || "",
+                peerError: "",
+                loading: false,
+                peer: {},
+                targetIdInput: "",
+                peerIds: [],
+                connections: {},
+                chats,
+                chatMessageInput: "",
+                profilePic: localStorage.getItem("profilePic") || null,
+                uploadedFiles: JSON.parse(localStorage.getItem("uploadedFiles") || "[]")
+            },
+            watch: {
+                chats: function () {
+                    const chatbox = document.getElementById("chatbox");
+                    if (chatbox) chatbox.scrollTop = chatbox.scrollHeight;
+                }
+            },
+            methods: {
+                getPeerId: username => appPrefix + username,
+                getUsername: peerId => peerId ? peerId.slice(appPrefix.length) : "",
+
+                addConnection: function (conn) {
+                    this.connections[conn.peer] = conn;
+                    this.updatePeerIds();
+                    console.log(`Connected to ${conn.peer}!`);
+                },
+                removeConnection: function (conn) {
+                    delete this.connections[conn.peer];
+                    this.updatePeerIds();
+                },
+                updatePeerIds: function () {
+                    this.peerIds = Object.keys(this.connections);
+                },
+                disconnectPeer: function () {
+                    this.peer.disconnect();
+                },
+
+                configureConnection: function (conn) {
+                    conn.on("data", data => {
+                        if (data.type === "chat") {
+                            this.receiveChat(data.chat);
+                        }
+                    });
+                    conn.on("close", () => this.removeConnection(conn));
+                    conn.on("error", () => this.removeConnection(conn));
+                },
+
+                initiateConnection: function (peerId) {
+                    if (!this.peerIds.includes(peerId) && peerId !== this.peer.id) {
+                        this.loading = true;
+                        this.peerError = "";
+                        console.log(`Connecting to ${peerId}...`);
+
+                        const conn = this.peer.connect(peerId);
+                        this.configureConnection(conn);
+
+                        conn.on("open", () => {
+                            this.addConnection(conn);
+                            this.loading = false;
+                        });
+                    }
+                },
+
+                createPeer: function () {
+                    this.peer = new Peer(this.getPeerId(this.usernameInput));
+
+                    this.peer.on("open", () => {
+                        this.screen = "chat";
+                        this.loading = false;
+                        this.peerError = "";
+                    });
+
+                    this.peer.on("error", error => {
+                        if (error.type === "unavailable-id") {
+                            this.loading = false;
+                            this.peerError = `${this.usernameInput} is already taken!`;
+                        } else {
+                            this.peerError = error;
+                        }
+                    });
+
+                    this.peer.on('connection', conn => {
+                        if (!this.peerIds.includes(conn.peer)) {
+                            this.configureConnection(conn);
+                        }
+                    });
+                },
+
+                submitLogin: function (event) {
+                    if (event) event.preventDefault();
+
+                    if (this.usernameInput.length > 0 && !this.loading) {
+                        this.loading = true;
+                        this.peerError = "";
+                        localStorage.setItem("username", this.usernameInput);
+                        this.createPeer();
+                    }
+                },
+
+                submitChat: function (event) {
+                    event.preventDefault();
+
+                    if (this.chatMessageInput.length > 0) {
+                        const chat = {
+                            sender: this.usernameInput,
+                            message: this.chatMessageInput,
+                            timestamp: new Date().getTime()
+                        };
+
+                        this.receiveChat(chat);
+                        Object.values(this.connections).forEach(conn => {
+                            conn.send({
+                                type: "chat",
+                                chat
+                            });
+                        });
+
+                        this.chatMessageInput = "";
+                    }
+                },
+
+                receiveChat: function (chat) {
+                    this.chats.push(chat);
+                    localStorage.setItem("chats", JSON.stringify(this.chats));
+                },
+
+                uploadProfilePic: function (event) {
+                    const file = event.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            this.profilePic = reader.result;
+                            localStorage.setItem("profilePic", this.profilePic);
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                },
+
+                setActiveSection: function (section) {
+                    this.screen = section;
+                },
+
+                uploadFile: function (event) {
+                    const file = event.target.files[0];
+                    if (file) {
+                        this.uploadedFiles.push(file);
+                        localStorage.setItem("uploadedFiles", JSON.stringify(this.uploadedFiles));
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
