@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Chat with Profiles, Connections, and File Sharing</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.3.1/dist/peerjs.min.js"></script>
+    <style>
+        /* Styling */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        .sidebar {
+            width: 200px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            background: #333;
+            color: white;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        .chat-screen {
+            margin-left: 220px;
+            padding: 20px;
+        }
+        .chat-message {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .chat-message img {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .sent {
+            flex-direction: row-reverse;
+            text-align: right;
+        }
+        .received {
+            flex-direction: row;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+            z-index: 100;
+        }
+        .modal.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <!-- Login Screen -->
+    <div v-if="screen === 'login'" class="login-screen">
+        <h2>Enter Peer ID</h2>
+        <form @submit.prevent="submitLogin">
+            <input v-model="peerIdInput" placeholder="Enter your Peer ID" required />
+            <button type="submit">Login</button>
+        </form>
+    </div>
+
+    <!-- Chat Screen -->
+    <div v-else class="chat-screen">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <h3>Your Profile</h3>
+            <img :src="profile.picture" alt="Profile Picture" width="50" />
+            <p>{{ profile.bio }}</p>
+            <button @click="openProfileModal">Edit Profile</button>
+            <button @click="openConnectionModal">Add Connection</button>
+            <button @click="logout">Logout</button>
+
+            <h4>Connected Peers</h4>
+            <ul>
+                <li v-for="peer in connectedPeers" :key="peer.id">
+                    <img :src="peer.profile.picture" alt="Profile Picture" width="30" @click="openUserProfileModal(peer.id)" />
+                    <strong>{{ peer.id }}</strong>
+                    <p>{{ peer.lastMessage }}</p>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Chat Area -->
+        <div>
+            <h2>Chat</h2>
+            <ul>
+                <li v-for="chat in chats" :key="chat.id" :class="['chat-message', chat.sender === peer.id ? 'sent' : 'received']">
+                    <img :src="chat.profile.picture" alt="Profile Picture" @click="openUserProfileModal(chat.sender)" />
+                    <div>
+                        <strong>{{ chat.sender }}</strong>:
+                        <span v-if="chat.type === 'text'">{{ chat.message }}</span>
+                        <a 
+    v-if="chat.type === 'file'" 
+    :href="chat.message" 
+    :download="chat.fileName" 
+    target="_blank">
+    {{ chat.fileName || 'Download File' }}
+</a>
+                        <a v-if="chat.type === 'link'" :href="chat.message" target="_blank">{{ chat.message }}</a>
+                    </div>
+                </li>
+            </ul>
+
+            <!-- Send Message Input Area -->
+            <input type="text" v-model="message" placeholder="Type your message..." />
+            <button @click="sendMessage">Send Message</button>
+            <button @click="openAddLinkModal">Add Link</button>
+            <button @click="openAddFileModal">Add File</button>
+        </div>
+
+        <!-- Add Link Modal -->
+        <div v-if="showAddLinkModal" class="modal show">
+            <h3>Add a Link</h3>
+            <form @submit.prevent="submitLink">
+                <label for="link">URL:</label>
+                <input type="url" v-model="link" id="link" placeholder="Enter a URL" required />
+                <button type="submit">Send Link</button>
+                <button type="button" @click="closeAddLinkModal">Cancel</button>
+            </form>
+        </div>
+
+        <!-- Add File Modal -->
+        <div v-if="showAddFileModal" class="modal show">
+            <h3>Add a File</h3>
+            <form @submit.prevent="submitFile">
+                <label for="file">File:</label>
+                <input type="file" @change="selectFile" id="file" required />
+                <button type="submit">Send File</button>
+                <button type="button" @click="closeAddFileModal">Cancel</button>
+            </form>
+        </div>
+
+        <!-- Profile Modal -->
+        <div v-if="showProfileModal" class="modal show">
+            <h3>Create/Edit Profile</h3>
+            <form @submit.prevent="saveProfile">
+                <label for="bio">Bio:</label>
+                <textarea v-model="profile.bio" id="bio" required></textarea>
+
+                <label for="picture">Profile Picture:</label>
+                <input type="file" @change="uploadPicture" id="picture" />
+
+                <button type="submit">Save</button>
+                <button type="button" @click="closeProfileModal">Cancel</button>
+            </form>
+        </div>
+        
+        <!-- User Profile Modal -->
+        <div v-if="showUserProfileModal" class="modal show">
+            <h3>{{ selectedPeer.id }}'s Profile</h3>
+            <img :src="selectedPeer.profile.picture" alt="Profile Picture" width="100" />
+            <p><strong>Bio:</strong> {{ selectedPeer.profile.bio }}</p>
+            <button @click="closeUserProfileModal">Close</button>
+        </div>
+
+        <!-- Connection Modal -->
+        <div v-if="showConnectionModal" class="modal show">
+            <h3>Add Connection</h3>
+            <form @submit.prevent="addConnection">
+                <label for="peerId">Peer ID:</label>
+                <input v-model="newPeerId" id="peerId" placeholder="Enter Peer ID" required />
+                <button type="submit">Connect</button>
+                <button type="button" @click="closeConnectionModal">Cancel</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+const app = new Vue({
+    el: "#app",
+    data: {
+        screen: "login",
+        peer: null,
+        peerIdInput: "",
+        connectedPeers: [],
+        chats: [],
+        message: "",
+        showAddLinkModal: false,
+        showAddFileModal: false,
+        link: "", // Link to send
+        selectedFile: null, // File to send
+        newPeerId: "",
+        profile: { 
+            bio: "This is your default bio. Edit it!", 
+            picture: "https://via.placeholder.com/50" 
+        },
+        showProfileModal: false,
+        showConnectionModal: false,
+        showUserProfileModal: false,
+        selectedPeer: null,
+        receivedMessageIds: new Set() // Track received message IDs to avoid duplicates
+    },
+    methods: {
+        // Modal Handlers
+        openAddLinkModal() {
+            this.showAddLinkModal = true;
+        },
+        closeAddLinkModal() {
+            this.showAddLinkModal = false;
+            this.link = "";
+        },
+        openAddFileModal() {
+            this.showAddFileModal = true;
+        },
+        closeAddFileModal() {
+            this.showAddFileModal = false;
+            this.selectedFile = null;
+        },
+        openUserProfileModal(peerId) {
+            this.selectedPeer = this.connectedPeers.find(peer => peer.id === peerId);
+            this.showUserProfileModal = true;
+        },
+        closeUserProfileModal() {
+            this.showUserProfileModal = false;
+        },
+        // Submit Handlers
+        submitLink() {
+            if (this.link.trim()) {
+                const linkChat = {
+                    id: Date.now(),
+                    sender: this.peer.id,
+                    message: this.link,
+                    type: "link",
+                    profile: this.profile
+                };
+                this.broadcast(linkChat);
+                this.closeAddLinkModal();
+            }
+        },
+        submitFile() {
+    if (this.selectedFile) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const fileChat = {
+                id: Date.now(),
+                sender: this.peer.id,
+                message: reader.result, // Base64 encoded file data
+                fileName: this.selectedFile.name, // Capture the original file name
+                type: "file",
+                profile: this.profile
+            };
+            this.broadcast(fileChat);
+            this.closeAddFileModal();
+        };
+        reader.readAsDataURL(this.selectedFile);
+    }
+}
+,
+        selectFile(event) {
+            this.selectedFile = event.target.files[0];
+        },
+        submitLogin() {
+            this.peer = new Peer(this.peerIdInput);
+            this.peer.on("open", () => this.screen = "chat");
+            this.peer.on("connection", conn => {
+                conn.on("data", data => {
+                    if (!this.receivedMessageIds.has(data.id)) {
+                        this.chats.push(data);
+                        this.receivedMessageIds.add(data.id); // Mark message as received
+                        this.updateLastMessage(conn.peer, data); // Update last message for the peer
+                    }
+                });
+                this.addConnectedPeer(conn.peer, conn.metadata.profile); // Add connected peer with profile
+            });
+        },
+        sendMessage() {
+            const uniqueId = Date.now() + Math.random().toString(36).substr(2, 9); // Create a unique ID
+
+            const chat = {
+                id: uniqueId, // Add unique ID here
+                sender: this.peer.id,
+                message: this.message,
+                profile: this.profile,
+                type: "text",
+                timestamp: Date.now()
+            };
+
+            this.broadcast(chat);
+            this.message = "";
+        },
+        broadcast(chat) {
+            // Push the chat to the local chats array
+            this.chats.push(chat);
+
+            // Send the message to all connected peers
+            this.connectedPeers.forEach(peer => {
+                // Check if the connection already exists
+                let conn = this.peer.connections[peer.id];
+
+                // If no connection exists or connection is closed, create a new one
+                if (!conn || !conn.open) {
+                    conn = this.peer.connect(peer.id, { metadata: { profile: this.profile } });
+
+                    conn.on("open", () => {
+                        console.log(`Connection to ${peer.id} established.`);
+                        conn.send(chat); // Send the chat after the connection is open
+                    });
+
+                    conn.on("error", (err) => {
+                        console.error('Connection error:', err);
+                    });
+
+                    conn.on("close", () => {
+                        console.log(`Connection to ${peer.id} closed.`);
+                    });
+                } else {
+                    // If the connection is already open, just send the message
+                    console.log(`Sending message to ${peer.id}`);
+                    conn.send(chat);
+                }
+            });
+        },
+        addConnection() {
+            if (!this.connectedPeers.find(peer => peer.id === this.newPeerId)) {
+                const conn = this.peer.connect(this.newPeerId, { metadata: { profile: this.profile } });
+                conn.on("open", () => this.addConnectedPeer(this.newPeerId, this.profile));
+            }
+            this.closeConnectionModal();
+        },
+        addConnectedPeer(peerId, profile) {
+            const existingPeer = this.connectedPeers.find(peer => peer.id === peerId);
+            if (!existingPeer) {
+                this.connectedPeers.push({ id: peerId, profile: profile, lastMessage: "" });
+            }
+        },
+        updateLastMessage(peerId, chat) {
+            const peer = this.connectedPeers.find(peer => peer.id === peerId);
+            if (peer) {
+                peer.lastMessage = chat.type === "text" ? chat.message : chat.type === "file" ? "File received" : "Link received";
+            }
+        },
+        openProfileModal() {
+            this.showProfileModal = true;
+        },
+        closeProfileModal() {
+            this.showProfileModal = false;
+        },
+        saveProfile() {
+            this.closeProfileModal();
+        },
+        openConnectionModal() {
+            this.showConnectionModal = true;
+        },
+        closeConnectionModal() {
+            this.showConnectionModal = false;
+        },
+        uploadPicture(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = () => this.profile.picture = reader.result;
+                reader.readAsDataURL(file);
+            }
+        },
+        logout() {
+            this.peer.disconnect();
+            this.screen = "login";
+        }
+    }
+});
+</script>
+</body>
+</html>
